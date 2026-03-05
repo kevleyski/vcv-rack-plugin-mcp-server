@@ -46,7 +46,15 @@ In VCV Rack, **modules do nothing on their own**. You must connect them with **v
 2.  **Processor:** A module that modifies a signal (e.g., `VCF` for filtering, `VCA` for volume).
 3.  **Sink:** A module that consumes a signal or sends it to the real world (e.g., `Audio Interface`).
 
-**Without cables (`connect` command), there is no sound.**
+### Audio Interface Configuration (IMPORTANT)
+
+**The MCP Server cannot automatically configure the "Audio Interface" module's driver or device.**
+
+- **Agent Responsibility:** Automatically add the `AudioInterface2` module (from the `Core` plugin) and connect the final output of your signal chain to its inputs (usually 0 for L and 1 for R).
+- **User Responsibility:** Once the module is added, the user **MUST** manually click the module in VCV Rack to select their preferred **Audio Driver** (e.g., Core Audio, ASIO, JACK) and **Device** (e.g., Built-in Output, Focusrite USB).
+- **Check for existing:** Before adding a new audio module, use `modules` to see if one is already present. If so, use its `id` instead of adding a new one.
+
+**Other modules (VCO, VCF, VCA, etc.) should be managed totally automatically by the agent.**
 
 ---
 

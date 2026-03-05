@@ -27,6 +27,10 @@ python skills/vcvrack_client.py add VCV VCO-1
 
 python skills/vcvrack_client.py add VCV AudioInterface2
 # → note returned id, e.g. 99
+
+### 4. Manually configure audio
+
+**Crucial Step:** Since the MCP server can't choose your hardware, you **must** manually click on the `AudioInterface2` module in the Rack window and select your **Audio Driver** and **Device**.
 ```
 
 ### 4. Inspect ports
