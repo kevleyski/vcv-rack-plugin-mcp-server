@@ -502,8 +502,16 @@ struct RackMcpServerWidget : ModuleWidget {
                 engine::Module* mod = APP->engine->getModule(id);
                 if (mod) {
                     app::ModuleWidget* mw = APP->scene->rack->getModule(mod->id);
-                    if (mw) { APP->scene->rack->removeModule(mw); delete mw; }
-                    APP->engine->removeModule(mod); delete mod;
+                    if (mw) {
+                        // High-level safe deletion via selection action
+                        APP->scene->rack->deselectAll();
+                        APP->scene->rack->select(mw);
+                        APP->scene->rack->deleteSelectionAction();
+                    } else {
+                        // Fallback: remove from engine if no widget exists
+                        APP->engine->removeModule(mod);
+                        delete mod;
+                    }
                 }
             }
         }
