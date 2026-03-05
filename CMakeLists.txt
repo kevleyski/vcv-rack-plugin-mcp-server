@@ -186,7 +186,7 @@ endif()
 # ── Install target ────────────────────────────────────────────────────────────
 # Determines Rack plugins folder per platform
 if(APPLE)
-  set(RACK_PLUGINS_DIR "$ENV{HOME}/Documents/Rack2/plugins")
+  set(RACK_PLUGINS_DIR "$ENV{HOME}/Library/Application Support/Rack2/plugins-${RACK_ARCH}")
 elseif(WIN32)
   set(RACK_PLUGINS_DIR "$ENV{APPDATA}/Rack2/plugins")
 else()

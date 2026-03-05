@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="90" height="380">
+  <!-- Dark background -->
+  <rect width="90" height="380" fill="#1a1a2e"/>
+  <!-- Top accent bar -->
+  <rect width="90" height="3" fill="#4a9eff"/>
+  <!-- Bottom accent bar -->
+  <rect y="377" width="90" height="3" fill="#4a9eff"/>
+</svg>

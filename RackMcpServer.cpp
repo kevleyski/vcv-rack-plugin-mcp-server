@@ -1,44 +1,15 @@
 /*
  * RackMcpServer.cpp
  * VCV Rack 2 Plugin — MCP HTTP Bridge
- *
- * Embeds a lightweight HTTP server (cpp-httplib, header-only) inside a VCV Rack
- * module. An external MCP server process (Node/Python) connects to this server
- * to control the patch programmatically.
- *
- * DEPENDENCY: cpp-httplib (MIT) — single header, place at:
- *   dep/include/httplib.h
- *   https://github.com/yhirose/cpp-httplib/releases/latest
- *
- * BUILD: Link with -pthread. On Windows link with -lws2_32 -lmswsock.
- *
- * ENDPOINTS (all return JSON):
- *
- *  GET  /status              — server alive, current patch info
- *  GET  /modules             — list all modules currently in the patch
- *  GET  /modules/:id         — detail for one module (params, inputs, outputs)
- *  POST /modules/add         — add a module  { plugin, slug, x?, y? }
- *  DELETE /modules/:id       — remove a module
- *  GET  /modules/:id/params  — get all param values
- *  POST /modules/:id/params  — set params    { params: [{id, value}] }
- *  GET  /cables              — list all cables
- *  POST /cables              — connect ports { outputModuleId, outputId, inputModuleId, inputId }
- *  DELETE /cables/:id        — disconnect a cable
- *  GET  /library             — list ALL installed plugins + their modules (for AI discovery)
- *  GET  /library/:plugin     — list modules in a specific plugin
- *  POST /patch/save          — save current patch to a path { path }
- *  POST /patch/load          — load patch from a path { path }
- *  GET  /sample-rate         — get engine sample rate
  */
 
 #include "plugin.hpp"
 
-// cpp-httplib (header-only, auto-downloaded by `make dep` or CMake FetchContent).
-// Disable OpenSSL — plain HTTP is fine for localhost-only use.
+// cpp-httplib (header-only)
 #define CPPHTTPLIB_OPENSSL_SUPPORT 0
 #include <httplib.h>
 
-// Rack headers for runtime introspection
+// Rack headers
 #include <rack.hpp>
 #include <app/RackWidget.hpp>
 #include <app/ModuleWidget.hpp>
@@ -48,15 +19,49 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <queue>
+#include <future>
 #include <sstream>
 #include <cstring>
 
 using namespace rack;
 
+struct RackMcpServer;
+class RackHttpServer;
+
+// ─── UI Task Queue ─────────────────────────────────────────────────────────
+
+struct UITaskQueue {
+    std::mutex mutex;
+    std::queue<std::pair<std::function<void()>, std::shared_ptr<std::promise<void>>>> tasks;
+
+    std::future<void> post(std::function<void()> fn) {
+        auto p = std::make_shared<std::promise<void>>();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            tasks.push({fn, p});
+        }
+        return p->get_future();
+    }
+
+    void drain() {
+        std::queue<std::pair<std::function<void()>, std::shared_ptr<std::promise<void>>>> local;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            std::swap(local, tasks);
+        }
+        while (!local.empty()) {
+            auto& [fn, p] = local.front();
+            try { fn(); p->set_value(); }
+            catch (...) { p->set_exception(std::current_exception()); }
+            local.pop();
+        }
+    }
+};
+
 // ─── tiny JSON builder helpers ─────────────────────────────────────────────
 
 static std::string jsonStr(const std::string& s) {
-    // Minimal JSON string escaping
     std::string out = "\"";
     for (char c : s) {
         switch (c) {
@@ -114,52 +119,39 @@ static std::string serializePortInfo(PortInfo* pi, int portId, bool isInput) {
     return s;
 }
 
-// Full module detail: params, inputs, outputs
 static std::string serializeModuleDetail(engine::Module* mod) {
     if (!mod) return "null";
-
     std::string s = "{";
     s += jsonKV("id", std::to_string(mod->id));
-
-    // Plugin/slug via model
     if (mod->model) {
         s += jsonKVs("plugin", mod->model->plugin ? mod->model->plugin->slug : "");
         s += jsonKVs("slug", mod->model->slug);
         s += jsonKVs("name", mod->model->name);
     }
-
-    // Params
+    app::ModuleWidget* mw = APP->scene->rack->getModule(mod->id);
+    if (mw) {
+        s += jsonKV("x", std::to_string(mw->box.pos.x));
+        s += jsonKV("y", std::to_string(mw->box.pos.y));
+    }
     s += jsonStr("params") + ": [";
     for (int i = 0; i < (int)mod->params.size(); i++) {
-        ParamQuantity* pq = mod->paramQuantities[i];
-        s += serializeParamQuantity(pq, i);
+        s += serializeParamQuantity(mod->paramQuantities[i], i);
         if (i < (int)mod->params.size() - 1) s += ", ";
     }
-    s += "], ";
-
-    // Inputs
-    s += jsonStr("inputs") + ": [";
+    s += "], " + jsonStr("inputs") + ": [";
     for (int i = 0; i < (int)mod->inputs.size(); i++) {
-        PortInfo* pi = (i < (int)mod->inputInfos.size()) ? mod->inputInfos[i] : nullptr;
-        s += serializePortInfo(pi, i, true);
+        s += serializePortInfo(i < (int)mod->inputInfos.size() ? mod->inputInfos[i] : nullptr, i, true);
         if (i < (int)mod->inputs.size() - 1) s += ", ";
     }
-    s += "], ";
-
-    // Outputs
-    s += jsonStr("outputs") + ": [";
+    s += "], " + jsonStr("outputs") + ": [";
     for (int i = 0; i < (int)mod->outputs.size(); i++) {
-        PortInfo* pi = (i < (int)mod->outputInfos.size()) ? mod->outputInfos[i] : nullptr;
-        s += serializePortInfo(pi, i, false);
+        s += serializePortInfo(i < (int)mod->outputInfos.size() ? mod->outputInfos[i] : nullptr, i, false);
         if (i < (int)mod->outputs.size() - 1) s += ", ";
     }
-    s += "]";
-
-    s += "}";
+    s += "]}";
     return s;
 }
 
-// Light summary only (for list view)
 static std::string serializeModuleSummary(engine::Module* mod) {
     if (!mod) return "null";
     std::string s = "{";
@@ -170,29 +162,32 @@ static std::string serializeModuleSummary(engine::Module* mod) {
         s += jsonKVs("name", mod->model->name);
         s += jsonKV("params", std::to_string(mod->params.size()));
         s += jsonKV("inputs", std::to_string(mod->inputs.size()));
-        s += jsonKV("outputs", std::to_string(mod->outputs.size()), true);
+        s += jsonKV("outputs", std::to_string(mod->outputs.size()));
+        app::ModuleWidget* mw = APP->scene->rack->getModule(mod->id);
+        if (mw) {
+            s += jsonKV("x", std::to_string(mw->box.pos.x));
+            s += jsonKV("y", std::to_string(mw->box.pos.y), true);
+        } else {
+            s += jsonKV("x", "0", false);
+            s += jsonKV("y", "0", true);
+        }
     }
     s += "}";
     return s;
 }
 
-// ─── Library catalogue helpers ─────────────────────────────────────────────
-
 static std::string serializeModel(plugin::Model* model) {
     std::string s = "{";
     s += jsonKVs("slug", model->slug);
     s += jsonKVs("name", model->name);
-    // Tags
     s += jsonStr("tags") + ": [";
-    int tagIdx = 0;
+    bool firstTag = true;
     for (int tagId : model->tagIds) {
-        if (tagIdx > 0) s += ", ";
+        if (!firstTag) s += ", ";
         s += jsonStr(rack::tag::getTag(tagId));
-        tagIdx++;
+        firstTag = false;
     }
-    s += "], ";
-    s += jsonKVs("description", model->description, true);
-    s += "}";
+    s += "], " + jsonKVs("description", model->description, true) + "}";
     return s;
 }
 
@@ -209,14 +204,12 @@ static std::string serializePlugin(plugin::Plugin* plug) {
         s += serializeModel(m);
         firstModel = false;
     }
-    s += "]";
-    s += "}";
+    s += "]}";
     return s;
 }
 
-// ─── Simple JSON parser helpers (avoids pulling in a full JSON lib) ─────────
+// ─── Simple JSON parser ────────────────────────────────────────────────────
 
-// Extract a top-level string field from a flat JSON object
 static std::string parseJsonString(const std::string& json, const std::string& key) {
     std::string searchKey = "\"" + key + "\"";
     auto pos = json.find(searchKey);
@@ -236,26 +229,73 @@ static double parseJsonDouble(const std::string& json, const std::string& key, d
     if (pos == std::string::npos) return def;
     pos = json.find(':', pos + searchKey.size());
     if (pos == std::string::npos) return def;
-    // skip whitespace
     while (pos < json.size() && (json[pos] == ':' || json[pos] == ' ')) pos++;
-    try { return std::stod(json.substr(pos)); }
-    catch (...) { return def; }
+    try { return std::stod(json.substr(pos)); } catch (...) { return def; }
 }
 
-// ─── HTTP Server wrapper ───────────────────────────────────────────────────
+// ─── Module Definition ─────────────────────────────────────────────────────
+
+struct RackMcpServer : Module {
+    enum ParamIds { PORT_PARAM, ENABLED_PARAM, NUM_PARAMS };
+    enum InputIds { NUM_INPUTS };
+    enum OutputIds { HEARTBEAT_OUTPUT, NUM_OUTPUTS };
+    enum LightIds { RUNNING_LIGHT, NUM_LIGHTS };
+
+    UITaskQueue taskQueue;
+    RackHttpServer* server = nullptr;
+    bool wasEnabled = false;
+    float heartbeatPhase = 0.f;
+
+    std::mutex pendingDeleteMutex;
+    std::vector<uint64_t> pendingDeleteIds;
+
+    RackMcpServer() {
+        config(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, NUM_LIGHTS);
+        configParam(PORT_PARAM, 2000.f, 9999.f, 2600.f, "HTTP Port")->snapEnabled = true;
+        configParam(ENABLED_PARAM, 0.f, 1.f, 0.f, "Enable HTTP Server");
+        configOutput(HEARTBEAT_OUTPUT, "Server heartbeat");
+    }
+    ~RackMcpServer();
+    void startServer(int port);
+    void stopServer();
+    void process(const ProcessArgs& args) override {
+        bool enabled = params[ENABLED_PARAM].getValue() > 0.5f;
+        if (enabled && !wasEnabled) startServer((int)params[PORT_PARAM].getValue());
+        else if (!enabled && wasEnabled) stopServer();
+        wasEnabled = enabled;
+        if (server) {
+            heartbeatPhase += args.sampleTime;
+            if (heartbeatPhase >= 1.f) heartbeatPhase -= 1.f;
+            outputs[HEARTBEAT_OUTPUT].setVoltage(heartbeatPhase < 0.05f ? 10.f : 0.f);
+        }
+    }
+    json_t* dataToJson() override {
+        json_t* rootJ = json_object();
+        json_object_set_new(rootJ, "enabled", json_boolean(wasEnabled));
+        return rootJ;
+    }
+    void dataFromJson(json_t* rootJ) override {
+        json_t* enabledJ = json_object_get(rootJ, "enabled");
+        if (enabledJ) params[ENABLED_PARAM].setValue(json_boolean_value(enabledJ) ? 1.f : 0.f);
+    }
+};
+
+// ─── HTTP Server ───────────────────────────────────────────────────────────
 
 class RackHttpServer {
 public:
     httplib::Server svr;
-    std::thread     serverThread;
+    std::thread serverThread;
     std::atomic<bool> running{false};
-    int             port;
+    int port;
+    UITaskQueue* taskQueue = nullptr;
+    RackMcpServer* parent = nullptr;
 
     RackHttpServer() : port(2600) {}
+    ~RackHttpServer() { stop(); }
 
     void setupRoutes() {
-
-        // ── CORS / JSON content-type middleware ──────────────────────────
+        auto* rackApp = APP;
         svr.set_pre_routing_handler([](const httplib::Request&, httplib::Response& res) {
             res.set_header("Access-Control-Allow-Origin", "*");
             res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
@@ -263,462 +303,211 @@ public:
             res.set_header("Content-Type", "application/json");
             return httplib::Server::HandlerResponse::Unhandled;
         });
+        svr.Options(".*", [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
 
-        svr.Options(".*", [](const httplib::Request&, httplib::Response& res) {
-            res.status = 204;
-        });
-
-        // ── GET /status ─────────────────────────────────────────────────
-        svr.Get("/status", [](const httplib::Request&, httplib::Response& res) {
-            float sr = APP->engine->getSampleRate();
-            std::vector<int64_t> ids = APP->engine->getModuleIds();
-            std::string body = "{";
-            body += jsonKVs("server", "VCV Rack MCP Bridge");
-            body += jsonKVs("version", "1.0.0");
-            body += jsonKV("sampleRate", std::to_string(sr));
-            body += jsonKV("moduleCount", std::to_string(ids.size()), true);
-            body += "}";
+        svr.Get("/status", [rackApp, this](const httplib::Request&, httplib::Response& res) {
+            float sr = 0.f; int count = 0;
+            taskQueue->post([rackApp, &sr, &count]() {
+                sr = rackApp->engine->getSampleRate();
+                count = (int)rackApp->engine->getModuleIds().size();
+            }).get();
+            std::string body = "{" + jsonKVs("server", "VCV Rack MCP Bridge") + jsonKVs("version", "1.3.0") +
+                jsonKVs("build", std::string(__DATE__) + " " + __TIME__) +
+                jsonKV("sampleRate", std::to_string(sr)) + jsonKV("moduleCount", std::to_string(count), true) + "}";
             res.set_content(ok(body), "application/json");
         });
 
-        // ── GET /modules ────────────────────────────────────────────────
-        svr.Get("/modules", [](const httplib::Request&, httplib::Response& res) {
-            std::vector<int64_t> ids = APP->engine->getModuleIds();
-            std::string body = "[";
-            for (int i = 0; i < (int)ids.size(); i++) {
-                engine::Module* mod = APP->engine->getModule(ids[i]);
-                if (mod) body += serializeModuleSummary(mod);
-                else     body += "null";
-                if (i < (int)ids.size() - 1) body += ", ";
-            }
-            body += "]";
-            res.set_content(ok(body), "application/json");
-        });
-
-        // ── GET /modules/:id ────────────────────────────────────────────
-        svr.Get(R"(/modules/(\d+))", [](const httplib::Request& req, httplib::Response& res) {
-            int64_t id = std::stoll(req.matches[1]);
-            engine::Module* mod = APP->engine->getModule(id);
-            if (!mod) {
-                res.status = 404;
-                res.set_content(err("Module not found"), "application/json");
-                return;
-            }
-            res.set_content(ok(serializeModuleDetail(mod)), "application/json");
-        });
-
-        // ── GET /modules/:id/params ─────────────────────────────────────
-        svr.Get(R"(/modules/(\d+)/params)", [](const httplib::Request& req, httplib::Response& res) {
-            int64_t id = std::stoll(req.matches[1]);
-            engine::Module* mod = APP->engine->getModule(id);
-            if (!mod) { res.status = 404; res.set_content(err("Module not found"), "application/json"); return; }
-            std::string body = "[";
-            for (int i = 0; i < (int)mod->params.size(); i++) {
-                ParamQuantity* pq = mod->paramQuantities[i];
-                body += serializeParamQuantity(pq, i);
-                if (i < (int)mod->params.size() - 1) body += ", ";
-            }
-            body += "]";
-            res.set_content(ok(body), "application/json");
-        });
-
-        // ── POST /modules/:id/params ────────────────────────────────────
-        // Body: { "params": [ { "id": 0, "value": 0.5 }, ... ] }
-        svr.Post(R"(/modules/(\d+)/params)", [](const httplib::Request& req, httplib::Response& res) {
-            int64_t id = std::stoll(req.matches[1]);
-            engine::Module* mod = APP->engine->getModule(id);
-            if (!mod) { res.status = 404; res.set_content(err("Module not found"), "application/json"); return; }
-
-            const std::string& body = req.body;
-            // Parse array: find all {"id":N,"value":V} objects
-            int applied = 0;
-            size_t pos = 0;
-            while (pos < body.size()) {
-                size_t start = body.find('{', pos);
-                if (start == std::string::npos) break;
-                size_t end = body.find('}', start);
-                if (end == std::string::npos) break;
-                std::string obj = body.substr(start, end - start + 1);
-                int paramId = (int)parseJsonDouble(obj, "id", -1);
-                double value = parseJsonDouble(obj, "value", 0.0);
-                if (paramId >= 0 && paramId < (int)mod->params.size()) {
-                    APP->engine->setParamValue(mod, paramId, (float)value);
-                    applied++;
+        svr.Get("/modules", [rackApp, this](const httplib::Request&, httplib::Response& res) {
+            std::string body;
+            taskQueue->post([rackApp, &body]() {
+                std::vector<int64_t> ids = rackApp->engine->getModuleIds();
+                body = "[";
+                for (size_t i = 0; i < ids.size(); i++) {
+                    engine::Module* mod = rackApp->engine->getModule(ids[i]);
+                    body += (mod ? serializeModuleSummary(mod) : "null") + (i < ids.size() - 1 ? ", " : "");
                 }
-                pos = end + 1;
-            }
-            res.set_content(ok("{" + jsonKV("applied", std::to_string(applied), true) + "}"), "application/json");
+                body += "]";
+            }).get();
+            res.set_content(ok(body), "application/json");
         });
 
-        // ── POST /modules/add ────────────────────────────────────────────
-        // Body: { "plugin": "VCV", "slug": "VCO", "x": 0, "y": 0 }
-        svr.Post("/modules/add", [](const httplib::Request& req, httplib::Response& res) {
-            std::string pluginSlug = parseJsonString(req.body, "plugin");
-            std::string moduleSlug = parseJsonString(req.body, "slug");
-            int x = (int)parseJsonDouble(req.body, "x", 0.0);
-            int y = (int)parseJsonDouble(req.body, "y", 0.0);
+        svr.Get(R"(/modules/(\d+))", [rackApp, this](const httplib::Request& req, httplib::Response& res) {
+            int64_t id = std::stoll(req.matches[1]);
+            std::string body;
+            taskQueue->post([rackApp, id, &body]() {
+                engine::Module* mod = rackApp->engine->getModule(id);
+                body = mod ? serializeModuleDetail(mod) : "null";
+            }).get();
+            if (body == "null") { res.status = 404; res.set_content(err("Module not found"), "application/json"); }
+            else res.set_content(ok(body), "application/json");
+        });
 
-            // Find model in plugin registry
+        svr.Post("/modules/add", [rackApp, this](const httplib::Request& req, httplib::Response& res) {
+            std::string pSlug = parseJsonString(req.body, "plugin"), mSlug = parseJsonString(req.body, "slug");
+            float x = (float)parseJsonDouble(req.body, "x", -1.0), y = (float)parseJsonDouble(req.body, "y", 0.0);
             plugin::Model* model = nullptr;
-            for (plugin::Plugin* plug : rack::plugin::plugins) {
-                if (plug->slug == pluginSlug) {
-                    for (plugin::Model* m : plug->models) {
-                        if (m->slug == moduleSlug) { model = m; break; }
+            for (plugin::Plugin* p : rack::plugin::plugins) if (p->slug == pSlug) for (plugin::Model* m : p->models) if (m->slug == mSlug) { model = m; break; }
+            if (!model) { res.status = 404; res.set_content(err("Model not found"), "application/json"); return; }
+            int64_t moduleId = -1;
+            taskQueue->post([rackApp, model, x, y, &moduleId]() mutable {
+                engine::Module* m = model->createModule(); if (!m) return;
+                rackApp->engine->addModule(m); moduleId = m->id;
+                app::ModuleWidget* mw = model->createModuleWidget(m); if (!mw) return;
+                rackApp->scene->rack->addModule(mw);
+                float px = x, py = y;
+                if (px < 0.f) {
+                    px = 0.f; bool found = false;
+                    for (app::ModuleWidget* w : rackApp->scene->rack->getModules()) {
+                        float r = w->box.pos.x + w->box.size.x;
+                        if (!found || r > px) { px = r; py = w->box.pos.y; found = true; }
                     }
-                    break;
                 }
-            }
-
-            if (!model) {
-                res.status = 404;
-                res.set_content(err("Model not found: " + pluginSlug + "/" + moduleSlug), "application/json");
-                return;
-            }
-
-            // Module creation must happen on the UI thread to avoid race conditions.
-            // We schedule it via APP->scene actions (same as drag-drop from browser).
-            // We do it synchronously here by posting an event to the main thread queue.
-            engine::Module* module = model->createModule();
-            if (!module) {
-                res.status = 500;
-                res.set_content(err("Failed to create module"), "application/json");
-                return;
-            }
-            APP->engine->addModule(module);
-
-            // Position on the rack canvas (in rack units, 1 HP = 15px)
-            APP->scene->rack->setModulePosForce(
-                APP->scene->rack->getModule(module->id),
-                math::Vec(x, y)
-            );
-
-            std::string body = "{";
-            body += jsonKV("id", std::to_string(module->id));
-            body += jsonKVs("plugin", pluginSlug);
-            body += jsonKVs("slug", moduleSlug, true);
-            body += "}";
-            res.set_content(ok(body), "application/json");
+                rackApp->scene->rack->setModulePosForce(mw, math::Vec(px, py));
+            }).get();
+            if (moduleId < 0) { res.status = 500; res.set_content(err("Failed to create module"), "application/json"); }
+            else res.set_content(ok("{" + jsonKV("id", std::to_string(moduleId)) + jsonKVs("plugin", pSlug) + jsonKVs("slug", mSlug, true) + "}"), "application/json");
         });
 
-        // ── DELETE /modules/:id ─────────────────────────────────────────
-        svr.Delete(R"(/modules/(\d+))", [](const httplib::Request& req, httplib::Response& res) {
+        svr.Delete(R"(/modules/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
             int64_t id = std::stoll(req.matches[1]);
-            engine::Module* mod = APP->engine->getModule(id);
-            if (!mod) { res.status = 404; res.set_content(err("Module not found"), "application/json"); return; }
-
-            // Remove widget + module via RackWidget helper (thread-safe path)
-            ModuleWidget* mw = APP->scene->rack->getModule(mod->id);
-            if (mw) APP->scene->rack->removeModule(mw);
-            APP->engine->removeModule(mod);
-            delete mod;
-
-            res.set_content(ok("{" + jsonKVs("removed", "true", true) + "}"), "application/json");
+            if (parent && parent->id == (uint64_t)id) { res.status = 403; res.set_content(err("Cannot delete server module"), "application/json"); return; }
+            if (parent) { std::lock_guard<std::mutex> lock(parent->pendingDeleteMutex); parent->pendingDeleteIds.push_back((uint64_t)id); }
+            res.set_content(ok("{\"status\":\"queued\",\"id\":" + std::to_string(id) + "}"), "application/json");
         });
 
-        // ── GET /cables ─────────────────────────────────────────────────
-        svr.Get("/cables", [](const httplib::Request&, httplib::Response& res) {
-            std::vector<int64_t> ids = APP->engine->getCableIds();
-            std::string body = "[";
-            for (int i = 0; i < (int)ids.size(); i++) {
-                engine::Cable* cable = APP->engine->getCable(ids[i]);
-                if (!cable) { body += "null"; }
-                else {
-                    body += "{";
-                    body += jsonKV("id", std::to_string(cable->id));
-                    body += jsonKV("outputModuleId", std::to_string(cable->outputModule ? cable->outputModule->id : -1));
-                    body += jsonKV("outputId", std::to_string(cable->outputId));
-                    body += jsonKV("inputModuleId", std::to_string(cable->inputModule ? cable->inputModule->id : -1));
-                    body += jsonKV("inputId", std::to_string(cable->inputId), true);
-                    body += "}";
-                }
-                if (i < (int)ids.size() - 1) body += ", ";
-            }
-            body += "]";
-            res.set_content(ok(body), "application/json");
-        });
-
-        // ── POST /cables ─────────────────────────────────────────────────
-        // Body: { "outputModuleId": 1, "outputId": 0, "inputModuleId": 2, "inputId": 0 }
-        svr.Post("/cables", [](const httplib::Request& req, httplib::Response& res) {
-            int64_t outModId  = (int64_t)parseJsonDouble(req.body, "outputModuleId", -1);
-            int     outPortId = (int)parseJsonDouble(req.body, "outputId", 0);
-            int64_t inModId   = (int64_t)parseJsonDouble(req.body, "inputModuleId", -1);
-            int     inPortId  = (int)parseJsonDouble(req.body, "inputId", 0);
-
-            engine::Module* outMod = APP->engine->getModule(outModId);
-            engine::Module* inMod  = APP->engine->getModule(inModId);
-            if (!outMod || !inMod) {
-                res.status = 404;
-                res.set_content(err("One or both modules not found"), "application/json");
-                return;
-            }
-
-            engine::Cable* cable = new engine::Cable;
-            cable->id = -1; // auto-assign
-            cable->outputModule = outMod;
-            cable->outputId     = outPortId;
-            cable->inputModule  = inMod;
-            cable->inputId      = inPortId;
-            APP->engine->addCable(cable);
-
-            res.set_content(ok("{" + jsonKV("id", std::to_string(cable->id), true) + "}"), "application/json");
-        });
-
-        // ── DELETE /cables/:id ───────────────────────────────────────────
-        svr.Delete(R"(/cables/(\d+))", [](const httplib::Request& req, httplib::Response& res) {
-            int64_t id = std::stoll(req.matches[1]);
-            engine::Cable* cable = APP->engine->getCable(id);
-            if (!cable) { res.status = 404; res.set_content(err("Cable not found"), "application/json"); return; }
-            APP->engine->removeCable(cable);
-            delete cable;
-            res.set_content(ok("{" + jsonKVs("removed", "true", true) + "}"), "application/json");
-        });
-
-        // ── GET /sample-rate ─────────────────────────────────────────────
-        svr.Get("/sample-rate", [](const httplib::Request&, httplib::Response& res) {
-            float sr = APP->engine->getSampleRate();
-            res.set_content(ok("{" + jsonKV("sampleRate", std::to_string(sr), true) + "}"), "application/json");
-        });
-
-        // ── GET /library ─────────────────────────────────────────────────
-        // Returns the full catalogue of installed plugins+modules.
-        // This is the endpoint an AI/LLM uses to pick the right module.
-        svr.Get("/library", [](const httplib::Request& req, httplib::Response& res) {
-            // Optional filter: /library?tags=VCO,Filter&q=oscillator
-            std::string tagFilter = req.has_param("tags") ? req.get_param_value("tags") : "";
-            std::string query     = req.has_param("q")    ? req.get_param_value("q")    : "";
-
-            // Normalise query to lowercase for matching
-            std::string queryLow = query;
-            std::transform(queryLow.begin(), queryLow.end(), queryLow.begin(), ::tolower);
-
-            std::string body = "[";
-            bool firstPlugin = true;
-            for (plugin::Plugin* plug : rack::plugin::plugins) {
-                // Filter at plugin level
-                std::vector<plugin::Model*> filteredModels;
-                for (plugin::Model* model : plug->models) {
-                    // Tag filter
-                    if (!tagFilter.empty()) {
-                        bool hasTag = false;
-                        for (int t : model->tagIds) {
-                            std::string tagName = rack::tag::getTag(t);
-                            std::string tagNameLow = tagName;
-                            std::transform(tagNameLow.begin(), tagNameLow.end(), tagNameLow.begin(), ::tolower);
-                            if (tagFilter.find(tagNameLow) != std::string::npos) { hasTag = true; break; }
-                        }
-                        if (!hasTag) continue;
-                    }
-                    // Text search in slug + name + description
-                    if (!queryLow.empty()) {
-                        std::string searchable = model->slug + " " + model->name + " " + model->description;
-                        std::transform(searchable.begin(), searchable.end(), searchable.begin(), ::tolower);
-                        if (searchable.find(queryLow) == std::string::npos) continue;
-                    }
-                    filteredModels.push_back(model);
-                }
-                if (filteredModels.empty()) continue;
-
-                if (!firstPlugin) body += ", ";
-                firstPlugin = false;
-
-                body += "{";
-                body += jsonKVs("slug", plug->slug);
-                body += jsonKVs("name", plug->name);
-                body += jsonKVs("author", plug->author);
-                body += jsonStr("modules") + ": [";
-                for (int i = 0; i < (int)filteredModels.size(); i++) {
-                    body += serializeModel(filteredModels[i]);
-                    if (i < (int)filteredModels.size() - 1) body += ", ";
-                }
-                body += "]}";
-            }
-            body += "]";
-            res.set_content(ok(body), "application/json");
-        });
-
-        // ── GET /library/:plugin ─────────────────────────────────────────
-        svr.Get(R"(/library/([^/]+))", [](const httplib::Request& req, httplib::Response& res) {
-            std::string pluginSlug = req.matches[1];
-            for (plugin::Plugin* plug : rack::plugin::plugins) {
-                if (plug->slug == pluginSlug) {
-                    res.set_content(ok(serializePlugin(plug)), "application/json");
-                    return;
-                }
-            }
-            res.status = 404;
-            res.set_content(err("Plugin not found: " + pluginSlug), "application/json");
-        });
-
-        // ── POST /patch/save ─────────────────────────────────────────────
-        // Body: { "path": "/home/user/mypatch.vcv" }
-        svr.Post("/patch/save", [](const httplib::Request& req, httplib::Response& res) {
-            std::string path = parseJsonString(req.body, "path");
-            if (path.empty()) { res.status = 400; res.set_content(err("Missing 'path'"), "application/json"); return; }
-            APP->patch->save(path);
-            res.set_content(ok("{" + jsonKVs("saved", path, true) + "}"), "application/json");
-        });
-
-        // ── POST /patch/load ─────────────────────────────────────────────
-        // Body: { "path": "/home/user/mypatch.vcv" }
-        svr.Post("/patch/load", [](const httplib::Request& req, httplib::Response& res) {
-            std::string path = parseJsonString(req.body, "path");
-            if (path.empty()) { res.status = 400; res.set_content(err("Missing 'path'"), "application/json"); return; }
-            APP->patch->load(path);
-            res.set_content(ok("{" + jsonKVs("loaded", path, true) + "}"), "application/json");
+        svr.Post("/cables", [rackApp, this](const httplib::Request& req, httplib::Response& res) {
+            int64_t outM = (int64_t)parseJsonDouble(req.body, "outputModuleId", -1), inM = (int64_t)parseJsonDouble(req.body, "inputModuleId", -1);
+            int outP = (int)parseJsonDouble(req.body, "outputId", 0), inP = (int)parseJsonDouble(req.body, "inputId", 0);
+            int64_t cableId = -1;
+            taskQueue->post([rackApp, outM, outP, inM, inP, &cableId]() {
+                engine::Module *o = rackApp->engine->getModule(outM), *i = rackApp->engine->getModule(inM);
+                if (o && i) { engine::Cable* c = new engine::Cable; c->outputModule = o; c->outputId = outP; c->inputModule = i; c->inputId = inP; rackApp->engine->addCable(c); cableId = c->id; }
+            }).get();
+            if (cableId < 0) { res.status = 404; res.set_content(err("Failed to connect"), "application/json"); }
+            else res.set_content(ok("{\"id\":" + std::to_string(cableId) + "}"), "application/json");
         });
     }
 
-    void start() {
-        setupRoutes();
-        running = true;
-        serverThread = std::thread([this]() {
-            INFO("[RackMcpServer] HTTP server starting on port %d", port);
-            svr.listen("127.0.0.1", port);
-            INFO("[RackMcpServer] HTTP server stopped");
-        });
-    }
-
-    void stop() {
-        if (running) {
-            svr.stop();
-            if (serverThread.joinable()) serverThread.join();
-            running = false;
-        }
-    }
-
-    ~RackHttpServer() { stop(); }
+    void start() { setupRoutes(); running = true; serverThread = std::thread([this]() { INFO("[RackMcpServer] Port %d", port); svr.listen("127.0.0.1", port); running = false; }); }
+    void stop() { if (running) { svr.stop(); if (serverThread.joinable()) serverThread.join(); running = false; } }
 };
 
-// ─── VCV Rack Module ──────────────────────────────────────────────────────
+RackMcpServer::~RackMcpServer() { stopServer(); }
+void RackMcpServer::startServer(int port) { stopServer(); server = new RackHttpServer(); server->port = port; server->taskQueue = &taskQueue; server->parent = this; server->start(); lights[RUNNING_LIGHT].setBrightness(1.f); }
+void RackMcpServer::stopServer() { if (server) { server->stop(); delete server; server = nullptr; } lights[RUNNING_LIGHT].setBrightness(0.f); }
 
-struct RackMcpServer : Module {
-    enum ParamIds {
-        PORT_PARAM,       // knob 2000-9999 (port number)
-        ENABLED_PARAM,    // on/off toggle
-        NUM_PARAMS
-    };
-    enum InputIds  { NUM_INPUTS };
-    enum OutputIds {
-        HEARTBEAT_OUTPUT, // pulses every second while server is running
-        NUM_OUTPUTS
-    };
-    enum LightIds {
-        RUNNING_LIGHT,
-        NUM_LIGHTS
-    };
+// ─── Port text field ──────────────────────────────────────────────────────
 
-    RackHttpServer* server = nullptr;
-    bool wasEnabled = false;
-    float heartbeatPhase = 0.f;
-
-    RackMcpServer() {
-        config(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, NUM_LIGHTS);
-        configParam(PORT_PARAM,    2000.f, 9999.f, 2600.f, "HTTP Port")->snapEnabled = true;
-        configButton(ENABLED_PARAM, "Enable HTTP Server");
-        configOutput(HEARTBEAT_OUTPUT, "Server heartbeat");
+struct PortTextField : LedDisplayTextField {
+    RackMcpServer* module = nullptr;
+    PortTextField() {
+        multiline = false;
+        color = nvgRGB(0x00, 0xff, 0x66); // Bright 'terminal' green
+        bgColor = nvgRGB(0x00, 0x00, 0x00); // Black background
+        textOffset = Vec(2.f, 0.f);
     }
-
-    ~RackMcpServer() {
-        stopServer();
-    }
-
-    void startServer(int port) {
-        stopServer();
-        server = new RackHttpServer();
-        server->port = port;
-        server->start();
-        lights[RUNNING_LIGHT].setBrightness(1.f);
-    }
-
-    void stopServer() {
-        if (server) {
-            server->stop();
-            delete server;
-            server = nullptr;
-        }
-        lights[RUNNING_LIGHT].setBrightness(0.f);
-    }
-
-    void process(const ProcessArgs& args) override {
-        bool enabled = params[ENABLED_PARAM].getValue() > 0.5f;
-        int  port    = (int)params[PORT_PARAM].getValue();
-
-        if (enabled && !wasEnabled) {
-            startServer(port);
-        } else if (!enabled && wasEnabled) {
-            stopServer();
-        }
-        wasEnabled = enabled;
-
-        // Heartbeat output: 1Hz pulse when server is running
-        if (server && server->running) {
-            heartbeatPhase += args.sampleTime;
-            if (heartbeatPhase >= 1.f) heartbeatPhase -= 1.f;
-            outputs[HEARTBEAT_OUTPUT].setVoltage(heartbeatPhase < 0.05f ? 10.f : 0.f);
-        } else {
-            outputs[HEARTBEAT_OUTPUT].setVoltage(0.f);
+    void step() override {
+        LedDisplayTextField::step();
+        if (!module) return;
+        // Sync from param only when not being edited
+        if (APP->event->getSelectedWidget() != this) {
+            int p = (int)module->params[RackMcpServer::PORT_PARAM].getValue();
+            std::string s = std::to_string(p); if (text != s) setText(s);
         }
     }
+    void onSelectKey(const SelectKeyEvent& e) override {
+        LedDisplayTextField::onSelectKey(e);
+        if (module && e.action == GLFW_PRESS && (e.key == GLFW_KEY_ENTER || e.key == GLFW_KEY_KP_ENTER)) {
+            module->params[RackMcpServer::PORT_PARAM].setValue((float)std::atoi(text.c_str()));
+            APP->event->setSelectedWidget(nullptr);
+        }
+    }
+};
 
-    json_t* dataToJson() override {
-        json_t* rootJ = json_object();
-        json_object_set_new(rootJ, "enabled", json_boolean(wasEnabled));
-        return rootJ;
+struct PanelLabelWidget : TransparentWidget {
+    void drawLabel(const DrawArgs& args, float x, float y, std::string txt, float fontSize, NVGcolor col) {
+        nvgFontFaceId(args.vg, APP->window->uiFont->handle);
+        nvgFontSize(args.vg, fontSize);
+        nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgFillColor(args.vg, col);
+        nvgText(args.vg, x, y, txt.c_str(), NULL);
     }
 
-    void dataFromJson(json_t* rootJ) override {
-        json_t* enabledJ = json_object_get(rootJ, "enabled");
-        if (enabledJ) params[ENABLED_PARAM].setValue(json_boolean_value(enabledJ) ? 1.f : 0.f);
+    void draw(const DrawArgs& args) override {
+        float cx = box.size.x / 2.f;
+        NVGcolor bright = nvgRGB(0xda, 0xda, 0xda); // Bright gray/silver
+        
+        // Title
+        drawLabel(args, cx, mm2px(12.f), "MCP", 13.f, bright);
+        drawLabel(args, cx, mm2px(20.f), "BRIDGE", 10.f, bright);
+
+        // Section labels
+        drawLabel(args, cx, mm2px(36.f),  "PORT",   7.5f, bright);
+        drawLabel(args, cx, mm2px(62.f),  "ON / OFF", 7.f, bright);
+        drawLabel(args, cx, mm2px(79.f),  "STATUS", 7.f, bright);
+        drawLabel(args, cx, mm2px(102.f), "BEAT",   7.f, bright);
     }
 };
 
 // ─── Widget ───────────────────────────────────────────────────────────────
 
 struct RackMcpServerWidget : ModuleWidget {
+    PortTextField* portField = nullptr;
+
     RackMcpServerWidget(RackMcpServer* module) {
         setModule(module);
         setPanel(createPanel(asset::plugin(pluginInstance, "res/RackMcpServer.svg")));
 
+        // Corner screws
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
-        // Port number knob (large, center)
-        addParam(createParamCentered<RoundLargeBlackKnob>(
-            mm2px(Vec(15.24, 40.f)), module, RackMcpServer::PORT_PARAM));
+        // Panel labels
+        auto* labels = createWidget<PanelLabelWidget>(Vec(0, 0));
+        labels->box.size = box.size;
+        addChild(labels);
 
-        // Enable button
-        addParam(createParamCentered<LEDButton>(
-            mm2px(Vec(15.24, 65.f)), module, RackMcpServer::ENABLED_PARAM));
+        // Port text field — positioned where the knob was
+        portField = createWidget<PortTextField>(mm2px(Vec(5.f, 38.f)));
+        portField->box.size = mm2px(Vec(20.5f, 8.f));
+        portField->module = module;
+        portField->setText(module
+            ? std::to_string((int)module->params[RackMcpServer::PORT_PARAM].getValue())
+            : "2600");
+        addChild(portField);
 
-        // Running LED
+        // Sticky enable switch
+        addParam(createParamCentered<CKSS>(
+            mm2px(Vec(15.24, 68.f)), module, RackMcpServer::ENABLED_PARAM));
+
+        // Running status LED
         addChild(createLightCentered<MediumLight<GreenLight>>(
-            mm2px(Vec(15.24, 75.f)), module, RackMcpServer::RUNNING_LIGHT));
+            mm2px(Vec(15.24, 84.f)), module, RackMcpServer::RUNNING_LIGHT));
 
         // Heartbeat output
         addOutput(createOutputCentered<PJ301MPort>(
-            mm2px(Vec(15.24, 110.f)), module, RackMcpServer::HEARTBEAT_OUTPUT));
+            mm2px(Vec(15.24, 108.f)), module, RackMcpServer::HEARTBEAT_OUTPUT));
     }
 
-    void appendContextMenu(Menu* menu) override {
-        RackMcpServer* module = getModule<RackMcpServer>();
-        menu->addChild(new MenuSeparator);
-        menu->addChild(createMenuItem("Copy server URL", "", [=]() {
-            int port = (int)module->params[RackMcpServer::PORT_PARAM].getValue();
-            glfwSetClipboardString(APP->window->win,
-                ("http://127.0.0.1:" + std::to_string(port)).c_str());
-        }));
-        menu->addChild(createMenuItem("Server status", "", [=]() {
-            bool running = module->server && module->server->running;
-            int  port    = (int)module->params[RackMcpServer::PORT_PARAM].getValue();
-            std::string msg = running
-                ? "Running on http://127.0.0.1:" + std::to_string(port)
-                : "Stopped";
-            // Display status in log (createTransientLabel not available in SDK)
-            INFO("RackMcpServer: %s", msg.c_str());
-        }));
+    void step() override {
+        ModuleWidget::step();
+        RackMcpServer* m = getModule<RackMcpServer>();
+        if (!m) return;
+        {
+            std::vector<uint64_t> toDelete;
+            { std::lock_guard<std::mutex> lock(m->pendingDeleteMutex); std::swap(toDelete, m->pendingDeleteIds); }
+            for (uint64_t id : toDelete) {
+                engine::Module* mod = APP->engine->getModule(id);
+                if (mod) {
+                    app::ModuleWidget* mw = APP->scene->rack->getModule(mod->id);
+                    if (mw) { APP->scene->rack->removeModule(mw); delete mw; }
+                    APP->engine->removeModule(mod); delete mod;
+                }
+            }
+        }
+        m->taskQueue.drain();
     }
 };
 

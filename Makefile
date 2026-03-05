@@ -50,10 +50,10 @@ else
 endif
 
 # ── Phony targets ─────────────────────────────────────────────────────────────
-.PHONY: all dep install dist clean
+.PHONY: all dep install dist clean test test-unit test-integration
 
 # ── Configure (also triggers dep downloads) ───────────────────────────────────
-$(BUILD_DIR)/CMakeCache.txt:
+$(BUILD_DIR)/CMakeCache.txt: CMakeLists.txt plugin.json
 	cmake -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release $(CMAKE_RACK_DIR)
 
 dep: $(BUILD_DIR)/CMakeCache.txt
@@ -81,6 +81,23 @@ dist: $(BUILD_DIR)/$(PLUGIN_FILE)
 	  rm -rf $$DIST_DIR
 	@echo "Created dist/$(SLUG)-$(VERSION)-$(DIST_PLATFORM).vcvplugin"
 
+# ── Tests ─────────────────────────────────────────────────────────────────────
+# Unit tests: compile standalone C++ test binary and run it (no Rack needed)
+tests/test_json_helpers: tests/test_json_helpers.cpp
+	c++ -std=c++17 -o tests/test_json_helpers tests/test_json_helpers.cpp
+
+test-unit: tests/test_json_helpers
+	tests/test_json_helpers
+
+# Integration tests: require VCV Rack running with MCP Server module ON
+# Pass PORT=XXXX to override the default port 2600.
+TEST_PORT ?= 2600
+test-integration:
+	python3 tests/test_server.py --port $(TEST_PORT)
+
+# Run unit tests only (safe, no VCV Rack needed)
+test: test-unit
+
 # ── Clean ─────────────────────────────────────────────────────────────────────
 clean:
-	rm -rf $(BUILD_DIR) dist
+	rm -rf $(BUILD_DIR) dist tests/test_json_helpers

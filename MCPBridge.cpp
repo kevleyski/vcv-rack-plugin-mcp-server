@@ -350,8 +350,8 @@ public:
         svr.Post("/modules/add", [](const httplib::Request& req, httplib::Response& res) {
             std::string pluginSlug = parseJsonString(req.body, "plugin");
             std::string moduleSlug = parseJsonString(req.body, "slug");
-            int x = (int)parseJsonDouble(req.body, "x", 0.0);
-            int y = (int)parseJsonDouble(req.body, "y", 0.0);
+            float x = (float)parseJsonDouble(req.body, "x", -1.0);
+            float y = (float)parseJsonDouble(req.body, "y", 0.0);
 
             // Find model in plugin registry
             plugin::Model* model = nullptr;
@@ -381,11 +381,29 @@ public:
             }
             APP->engine->addModule(module);
 
+            // Create and add the ModuleWidget to the rack, then position it.
+            app::ModuleWidget* moduleWidget = model->createModuleWidget(module);
+            if (!moduleWidget) {
+                res.status = 500;
+                res.set_content(err("Failed to create module widget"), "application/json");
+                return;
+            }
+            APP->scene->rack->addModule(moduleWidget);
+
+            // If x not specified, auto-place after the rightmost existing module.
+            if (x < 0.f) {
+                x = 0.f;
+                for (app::ModuleWidget* mw : APP->scene->rack->getModules()) {
+                    float right = mw->box.pos.x + mw->box.size.x;
+                    if (right > x) {
+                        x = right;
+                        y = mw->box.pos.y;
+                    }
+                }
+            }
+
             // Position on the rack canvas (in rack units, 1 HP = 15px)
-            APP->scene->rack->setModulePosForce(
-                APP->scene->rack->getModuleWidget(module),
-                math::Vec(x, y)
-            );
+            APP->scene->rack->setModulePosForce(moduleWidget, math::Vec(x, y));
 
             std::string body = "{";
             body += jsonKV("id", std::to_string(module->id));

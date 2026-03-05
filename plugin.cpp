@@ -2,7 +2,7 @@
 
 Plugin* pluginInstance;
 
-void init(Plugin* p) {
+extern "C" void init(Plugin* p) {
 	pluginInstance = p;
 
 	// Register modules
