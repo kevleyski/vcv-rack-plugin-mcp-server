@@ -1216,9 +1216,9 @@ struct PortTextField : LedDisplayTextField {
     RackMcpServer* module = nullptr;
     PortTextField() {
         multiline = false;
-        color = nvgRGB(0x00, 0xff, 0x66); // Bright 'terminal' green
-        bgColor = nvgRGB(0x00, 0x00, 0x00); // Black background
-        textOffset = Vec(2.f, 0.f);
+        color = nvgRGB(0x7d, 0xec, 0xc2);
+        bgColor = nvgRGB(0x14, 0x1d, 0x33);
+        textOffset = Vec(5.f, 0.f);
     }
     void step() override {
         LedDisplayTextField::step();
@@ -1239,27 +1239,63 @@ struct PortTextField : LedDisplayTextField {
 };
 
 struct PanelLabelWidget : TransparentWidget {
-    void drawLabel(const DrawArgs& args, float x, float y, std::string txt, float fontSize, NVGcolor col) {
+    void drawLabel(const DrawArgs& args, float x, float y, std::string txt, float fontSize, NVGcolor col, int align = NVG_ALIGN_CENTER) {
         nvgFontFaceId(args.vg, APP->window->uiFont->handle);
         nvgFontSize(args.vg, fontSize);
-        nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgTextLetterSpacing(args.vg, 0.3f);
+        nvgTextAlign(args.vg, align | NVG_ALIGN_MIDDLE);
         nvgFillColor(args.vg, col);
         nvgText(args.vg, x, y, txt.c_str(), NULL);
     }
 
-    void draw(const DrawArgs& args) override {
-        float cx = box.size.x / 2.f;
-        NVGcolor bright = nvgRGB(0xda, 0xda, 0xda); // Bright gray/silver
-        
-        // Title
-        drawLabel(args, cx, mm2px(12.f), "MCP", 13.f, bright);
-        drawLabel(args, cx, mm2px(20.f), "BRIDGE", 10.f, bright);
+    void drawDivider(const DrawArgs& args, float y) {
+        nvgBeginPath(args.vg);
+        nvgMoveTo(args.vg, mm2px(4.5f), y);
+        nvgLineTo(args.vg, box.size.x - mm2px(4.5f), y);
+        nvgStrokeWidth(args.vg, 1.0f);
+        nvgStrokeColor(args.vg, nvgRGBA(0x9a, 0xa8, 0xc9, 70));
+        nvgStroke(args.vg);
+    }
 
-        // Section labels
-        drawLabel(args, cx, mm2px(36.f),  "PORT",   7.5f, bright);
-        drawLabel(args, cx, mm2px(62.f),  "ON / OFF", 7.f, bright);
-        drawLabel(args, cx, mm2px(79.f),  "STATUS", 7.f, bright);
-        drawLabel(args, cx, mm2px(102.f), "BEAT",   7.f, bright);
+    void drawCard(const DrawArgs& args, float xMm, float yMm, float wMm, float hMm) {
+        Rect r = Rect(mm2px(Vec(xMm, yMm)), mm2px(Vec(wMm, hMm)));
+        nvgBeginPath(args.vg);
+        nvgRoundedRect(args.vg, r.pos.x, r.pos.y, r.size.x, r.size.y, 7.f);
+        nvgFillColor(args.vg, nvgRGBA(0x13, 0x1a, 0x2d, 150));
+        nvgFill(args.vg);
+        nvgStrokeWidth(args.vg, 1.2f);
+        nvgStrokeColor(args.vg, nvgRGBA(0x84, 0x95, 0xbb, 90));
+        nvgStroke(args.vg);
+    }
+
+    void draw(const DrawArgs& args) override {
+        const float cx = box.size.x / 2.f;
+        const float left = mm2px(6.5f);
+        NVGcolor title = nvgRGB(0xef, 0xf3, 0xff);
+        NVGcolor label = nvgRGB(0xaa, 0xb5, 0xd3);
+
+        drawLabel(args, cx, mm2px(12.f), "MCP SERVER", 11.0f, title);
+        drawLabel(args, cx, mm2px(19.f), "local bridge", 6.0f, nvgRGBA(0xc0, 0xcb, 0xe8, 140));
+
+        drawDivider(args, mm2px(27.f));
+
+        drawLabel(args, left, mm2px(36.f), "PORT", 7.2f, label, NVG_ALIGN_LEFT);
+        drawCard(args, 4.8f, 39.f, 20.9f, 12.0f);
+
+        drawDivider(args, mm2px(57.f));
+
+        drawLabel(args, left, mm2px(62.f), "POWER", 7.2f, label, NVG_ALIGN_LEFT);
+        drawCard(args, 4.8f, 65.f, 20.9f, 12.5f);
+
+        drawDivider(args, mm2px(81.f));
+
+        drawLabel(args, left, mm2px(79.f), "STATUS", 7.2f, label, NVG_ALIGN_LEFT);
+        drawCard(args, 4.8f, 82.f, 20.9f, 12.5f);
+
+        drawDivider(args, mm2px(100.f));
+
+        drawLabel(args, left, mm2px(102.f), "CLOCK", 7.2f, label, NVG_ALIGN_LEFT);
+        drawCard(args, 4.8f, 105.f, 20.9f, 14.5f);
     }
 };
 
@@ -1283,9 +1319,9 @@ struct RackMcpServerWidget : ModuleWidget {
         labels->box.size = box.size;
         addChild(labels);
 
-        // Port text field — positioned where the knob was
-        portField = createWidget<PortTextField>(mm2px(Vec(5.f, 38.f)));
-        portField->box.size = mm2px(Vec(20.5f, 8.f));
+        // Port text field
+        portField = createWidget<PortTextField>(mm2px(Vec(6.2f, 42.2f)));
+        portField->box.size = mm2px(Vec(18.5f, 8.5f));
         portField->module = module;
         portField->setText(module
             ? std::to_string((int)module->params[RackMcpServer::PORT_PARAM].getValue())
