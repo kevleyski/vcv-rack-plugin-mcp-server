@@ -76,7 +76,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: stage-lin-x64
-          path: _stage/VCVRackMcpServer/**
+          path: _stage/VCVRackMcpServer
 
 # =============================================================================
 # Job 3 — Build macOS x64 and ARM64 (native runners, CMake)
@@ -128,7 +128,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: stage-mac-${{ matrix.arch }}
-          path: _stage/VCVRackMcpServer/**
+          path: _stage/VCVRackMcpServer
 
 # =============================================================================
 # Job 4 — Collect distributables after all builds succeed
@@ -155,17 +155,23 @@ jobs:
           for artifact_dir in _artifacts/stage-*; do
             artifact_name=$(basename "$artifact_dir")
             platform="${artifact_name#stage-}"
-            src_dir="$artifact_dir/VCVRackMcpServer"
             out_file="_release/${slug}-${version}-${platform}.vcvplugin"
 
-            if [ ! -d "$src_dir" ]; then
+            if [ -d "$artifact_dir/VCVRackMcpServer" ]; then
+              zip_root="$artifact_dir"
+              zip_entry="VCVRackMcpServer"
+            elif [ -f "$artifact_dir/plugin.json" ]; then
+              zip_root="$(dirname "$artifact_dir")"
+              zip_entry="$(basename "$artifact_dir")"
+            else
               echo "Missing staged payload in $artifact_dir"
+              find "$artifact_dir" -maxdepth 3 -print | sort
               exit 1
             fi
 
             (
-              cd "$artifact_dir"
-              zip -r "$GITHUB_WORKSPACE/$out_file" VCVRackMcpServer
+              cd "$zip_root"
+              zip -r "$GITHUB_WORKSPACE/$out_file" "$zip_entry"
             )
           done
 
