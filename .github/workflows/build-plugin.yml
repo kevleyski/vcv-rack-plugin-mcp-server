@@ -70,7 +70,7 @@ jobs:
         run: |
           mkdir -p _stage/VCVRackMcpServer/res
           cp build/plugin.so _stage/VCVRackMcpServer/
-          cp plugin.json _stage/VCVRackMcpServer/
+          cp build/plugin.json _stage/VCVRackMcpServer/plugin.json
           cp -R res/. _stage/VCVRackMcpServer/res/
 
       - uses: actions/upload-artifact@v4
@@ -122,7 +122,7 @@ jobs:
         run: |
           mkdir -p _stage/VCVRackMcpServer/res
           cp build/plugin.dylib _stage/VCVRackMcpServer/
-          cp plugin.json _stage/VCVRackMcpServer/
+          cp build/plugin.json _stage/VCVRackMcpServer/plugin.json
           cp -R res/. _stage/VCVRackMcpServer/res/
 
       - uses: actions/upload-artifact@v4

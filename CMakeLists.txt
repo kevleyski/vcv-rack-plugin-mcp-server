@@ -218,9 +218,28 @@ install(DIRECTORY res/
 
 message(STATUS "Install target: ${PLUGIN_INSTALL_DIR}")
 
+# ── Package target (.vcvplugin archive for GitHub Releases / manual install) ─
+set(PACKAGE_ROOT_DIR "${CMAKE_BINARY_DIR}/package/${PROJECT_NAME}")
+set(DIST_DIR "${CMAKE_SOURCE_DIR}/dist")
+set(VCVPLUGIN_PATH "${DIST_DIR}/${PROJECT_NAME}-${PROJECT_VERSION}-${RACK_ARCH}.vcvplugin")
+
+add_custom_target(dist
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/package"
+  COMMAND ${CMAKE_COMMAND} -E rm -rf "${PACKAGE_ROOT_DIR}"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${PACKAGE_ROOT_DIR}"
+  COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:VCVRackMcpServer>" "${PACKAGE_ROOT_DIR}/plugin${PLUGIN_EXT}"
+  COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_BINARY_DIR}/plugin.json" "${PACKAGE_ROOT_DIR}/plugin.json"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/res" "${PACKAGE_ROOT_DIR}/res"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${DIST_DIR}"
+  COMMAND ${CMAKE_COMMAND} -E chdir "${CMAKE_BINARY_DIR}/package" ${CMAKE_COMMAND} -E tar "cf" "${VCVPLUGIN_PATH}" --format=zip "${PROJECT_NAME}"
+  DEPENDS VCVRackMcpServer
+  COMMENT "Packaging ${VCVPLUGIN_PATH}"
+)
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 message(STATUS "vcv-rack-mcp-server plugin configured.")
 message(STATUS "  Platform : ${RACK_ARCH}")
 message(STATUS "  Rack SDK : ${RACK_DIR}")
 message(STATUS "  Build    : cmake --build <build_dir>")
 message(STATUS "  Install  : cmake --install <build_dir>")
+message(STATUS "  Dist     : cmake --build <build_dir> --target dist")

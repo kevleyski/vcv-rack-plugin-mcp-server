@@ -68,17 +68,9 @@ all: $(BUILD_DIR)/$(PLUGIN_FILE)
 install: $(BUILD_DIR)/$(PLUGIN_FILE)
 	cmake --install $(BUILD_DIR)
 
-# ── Package as .vcvplugin (zip: plugin binary + plugin.json + res/) ───────────
+# ── Package as .vcvplugin (zip: plugin binary + generated plugin.json + res/) ─
 dist: $(BUILD_DIR)/$(PLUGIN_FILE)
-	@mkdir -p dist
-	@DIST_DIR=$$(mktemp -d); \
-	  PDIR=$$DIST_DIR/$(SLUG); \
-	  mkdir -p $$PDIR; \
-	  cp $(BUILD_DIR)/$(PLUGIN_FILE) $$PDIR/; \
-	  cp plugin.json $$PDIR/; \
-	  [ -d res ] && cp -r res $$PDIR/res || true; \
-	  cd $$DIST_DIR && zip -r "$(CURDIR)/dist/$(SLUG)-$(VERSION)-$(DIST_PLATFORM).vcvplugin" $(SLUG)/; \
-	  rm -rf $$DIST_DIR
+	cmake --build $(BUILD_DIR) --target dist
 	@echo "Created dist/$(SLUG)-$(VERSION)-$(DIST_PLATFORM).vcvplugin"
 
 # ── Tests ─────────────────────────────────────────────────────────────────────

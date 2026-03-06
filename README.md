@@ -64,6 +64,22 @@ Once the plugin is approved in the VCV Library:
 3. Double-click the file, or place it in your Rack 2 plugins folder.
 4. Restart Rack and add the module from the browser.
 
+### Build your own release package
+
+If you are building from source and want the same installable artifact used on GitHub Releases:
+
+```bash
+make dist
+```
+
+This creates a `.vcvplugin` archive in `dist/`, for example:
+
+```text
+dist/VCVRackMcpServer-2.1.0-mac-arm64.vcvplugin
+```
+
+That file is the one to upload to a GitHub Release or to install manually in Rack.
+
 ## Quick start in Rack
 
 1. Open VCV Rack 2.
