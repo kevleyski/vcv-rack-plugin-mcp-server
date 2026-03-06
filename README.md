@@ -1,5 +1,9 @@
 # vcv-rack-mcp-server
 
+![VCV Rack MCP Server patch demo](docs/demo-1.png)
+
+`vcv-rack-mcp-server` lets AI clients control a live VCV Rack 2 patch through a dedicated Rack module that exposes both HTTP and MCP endpoints. The screenshot above shows the `MCP Server` module running alongside a simple ambient drone patch created through the server and saved back to Rack.
+
 Connect AI clients to VCV Rack 2 through a module that exposes Rack over HTTP and MCP.
 With the `MCP Server` module loaded in a patch, an MCP client can inspect the patch, add modules, connect cables, set parameters, and save or load `.vcv` files.
 
