@@ -345,8 +345,8 @@ static const char* MCP_TOOLS_JSON = R"json([
 {"name":"vcvrack_get_module","description":"Get detailed information about a specific module: all parameters (with value ranges), inputs, and outputs.","inputSchema":{"type":"object","properties":{"id":{"type":"integer","description":"Module ID"}},"required":["id"]}},
 {"name":"vcvrack_add_module","description":"Add a new module to the VCV Rack patch. Modules are auto-positioned to the right of the MCP bridge module by default. Use nearModuleId to place a module next to a specific related module (e.g. place a VCF right next to a VCO). Use vcvrack_search_library to discover valid plugin/slug values.","inputSchema":{"type":"object","properties":{"plugin":{"type":"string","description":"Plugin slug (e.g. 'Fundamental')"},"slug":{"type":"string","description":"Module slug (e.g. 'VCO-1')"},"nearModuleId":{"type":"integer","description":"Optional: ID of an existing module to place this new module next to (immediately to its right). Use this to keep related modules together."},"x":{"type":"number","description":"X position in pixels (optional, overrides auto-placement)"},"y":{"type":"number","description":"Y position in pixels (optional, used only when x is also provided)"}},"required":["plugin","slug"]}},
 {"name":"vcvrack_delete_module","description":"Delete a module from the VCV Rack patch by ID.","inputSchema":{"type":"object","properties":{"id":{"type":"integer","description":"Module ID to delete"}},"required":["id"]}},
-{"name":"vcvrack_get_params","description":"Get all parameters of a module with names, value ranges, and current values.","inputSchema":{"type":"object","properties":{"moduleId":{"type":"integer","description":"Module ID"}},"required":["moduleId"]}},
-{"name":"vcvrack_set_params","description":"Set one or more parameters on a module. Call vcvrack_get_params first to discover parameter IDs and valid value ranges.","inputSchema":{"type":"object","properties":{"moduleId":{"type":"integer","description":"Module ID"},"params":{"type":"array","description":"Array of parameter updates","items":{"type":"object","properties":{"id":{"type":"integer","description":"Parameter index (0-based)"},"value":{"type":"number","description":"New parameter value"}},"required":["id","value"]}}},"required":["moduleId","params"]}},
+{"name":"vcvrack_get_params","description":"Get all parameters of a module with names, value ranges, current raw values, display strings, and switch options when available. Use this before setting params because many Rack controls are normalized knob values rather than Hz or seconds.","inputSchema":{"type":"object","properties":{"moduleId":{"type":"integer","description":"Module ID"}},"required":["moduleId"]}},
+{"name":"vcvrack_set_params","description":"Set one or more parameters on a module. Always call vcvrack_get_params first to discover parameter IDs, min/max ranges, display strings, and switch options. Prefer small batches, keep values inside the reported min/max range, and re-read params after writing to confirm the change applied.","inputSchema":{"type":"object","properties":{"moduleId":{"type":"integer","description":"Module ID"},"params":{"type":"array","description":"Array of parameter updates","items":{"type":"object","properties":{"id":{"type":"integer","description":"Parameter index (0-based)"},"value":{"type":"number","description":"New parameter value"}},"required":["id","value"]}}},"required":["moduleId","params"]}},
 {"name":"vcvrack_list_cables","description":"List all cable connections in the current patch.","inputSchema":{"type":"object","properties":{}}},
 {"name":"vcvrack_add_cable","description":"Connect an output port to an input port with a patch cable.","inputSchema":{"type":"object","properties":{"outputModuleId":{"type":"integer","description":"Source module ID"},"outputId":{"type":"integer","description":"Output port index (0-based)"},"inputModuleId":{"type":"integer","description":"Destination module ID"},"inputId":{"type":"integer","description":"Input port index (0-based)"}},"required":["outputModuleId","outputId","inputModuleId","inputId"]}},
 {"name":"vcvrack_delete_cable","description":"Remove a cable connection by cable ID.","inputSchema":{"type":"object","properties":{"id":{"type":"integer","description":"Cable ID"}},"required":["id"]}},
@@ -408,8 +408,10 @@ static std::string buildPromptMessages(const std::string& name, const std::strin
             "3. Call vcvrack_add_module for each required module, noting the returned module ID.\n"
             "4. Call vcvrack_get_module on each module to discover input/output port indices.\n"
             "5. Call vcvrack_add_cable to wire the signal path (e.g. VCO OUT -> VCF IN -> VCA IN -> Audio IN).\n"
-            "6. Call vcvrack_get_params then vcvrack_set_params to tune frequencies, resonance, levels, etc.\n"
-            "7. Optionally call vcvrack_save_patch to persist the patch.\n\n"
+            "6. Call vcvrack_get_params before every tuning step so you can see each control's raw range, display string, and any switch labels.\n"
+            "7. Use vcvrack_set_params in small batches and only with values inside the reported min/max range. Remember that many Rack knobs are normalized control values, not direct musical units such as Hz.\n"
+            "8. After each write, call vcvrack_get_params again to confirm the values changed as expected before continuing.\n"
+            "9. Optionally call vcvrack_save_patch to persist the patch.\n\n"
             "Always verify each step's result before proceeding to the next.";
         return "[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":" + jsonStr(text) + "}}]";
     }
@@ -434,9 +436,10 @@ static std::string buildPromptMessages(const std::string& name, const std::strin
             "You need to configure parameters on " + (mod.empty() ? "a module" : mod) + ".\n\n"
             "Steps:\n"
             "1. If you don't have the module ID, call vcvrack_list_modules.\n"
-            "2. Call vcvrack_get_params with the moduleId to list all parameters, their indices, current values, and min/max ranges.\n"
-            "3. Call vcvrack_set_params with an array of {id, value} objects to apply the desired settings.\n"
-            "4. Call vcvrack_get_params again to confirm the values were applied.";
+            "2. Call vcvrack_get_params with the moduleId to list all parameters, their indices, raw min/max ranges, display strings, and switch options.\n"
+            "3. Do not guess units from the parameter name alone. Many modules expose normalized control values, so use the reported display string and ranges as the source of truth.\n"
+            "4. Call vcvrack_set_params with a small array of {id, value} objects that stay inside the reported range.\n"
+            "5. Call vcvrack_get_params again to confirm the values were applied before making more edits.";
         return "[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":" + jsonStr(text) + "}}]";
     }
 

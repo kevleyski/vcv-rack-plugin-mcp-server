@@ -13,13 +13,19 @@ Commands:
   module <id>                         Detail for one module
   add <plugin_slug> <module_slug> [x y]  Add a module
   remove <id>                         Remove a module
-  params <id>                         Get all param values for a module
-  set-param <id> <param_id> <value> [<param_id> <value> ...]  Set params
+  params <id>                         Get parameter metadata and current raw values for a module
+  set-param <id> <param_id> <value> [<param_id> <value> ...]  Set params (prefer small batches after inspecting params)
   cables                              List all cables
   connect <out_mod_id> <out_port_id> <in_mod_id> <in_port_id>  Connect ports
   disconnect <cable_id>               Remove a cable
   save <path>                         Save current patch
   load <path>                         Load a patch
+
+Notes:
+  - Always run `params <id>` before `set-param` so you can use the module's real
+    min/max range, displayValue, and options instead of guessing from the name.
+  - Many Rack controls use normalized raw values rather than literal Hz/seconds.
+  - If a write times out, confirm Rack is responsive and retry with a smaller batch.
 """
 
 import sys

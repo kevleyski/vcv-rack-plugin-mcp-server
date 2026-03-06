@@ -52,20 +52,45 @@ python skills/vcvrack_client.py module 13
 # Audio inputs: 0=L, 1=R
 ```
 
-### 4. Set parameters
+### 4. Inspect params before setting them
 
 ```bash
-# VCO: FREQ=0 (A4), WAVE stays at default SAW
+python skills/vcvrack_client.py params 10
+python skills/vcvrack_client.py params 11
+python skills/vcvrack_client.py params 12
+```
+
+Use the returned `displayValue`, `min`, `max`, and optional `options` fields as
+the source of truth. The values below are good starting points for the VCV
+modules shown here, but verify them against the live param metadata before
+writing.
+
+### 5. Set parameters in small batches
+
+```bash
+# VCO: FREQ=0 (often A4), but confirm with `params 10` first
 python skills/vcvrack_client.py set-param 10 0 0.0
 
-# VCF: FREQ cutoff (param 0) = 0.5 (mid), RES (param 1) = 0.3
-python skills/vcvrack_client.py set-param 11 0 0.5 1 0.3
+# VCF: set cutoff first, then resonance
+python skills/vcvrack_client.py set-param 11 0 0.5
+python skills/vcvrack_client.py params 11
 
-# VCA: LEVEL (param 0) = 1.0 (full open — CV will control amplitude)
+# VCF: add a little resonance
+python skills/vcvrack_client.py set-param 11 1 0.3
+
+# VCA: LEVEL (param 0) = 1.0 (full open)
 python skills/vcvrack_client.py set-param 12 0 1.0
 ```
 
-### 5. Wire the signal chain
+### 6. Re-read params to verify the settings
+
+```bash
+python skills/vcvrack_client.py params 10
+python skills/vcvrack_client.py params 11
+python skills/vcvrack_client.py params 12
+```
+
+### 7. Wire the signal chain
 
 ```bash
 # VCO SAW (out 2) → VCF IN (in 0)
@@ -81,11 +106,16 @@ python skills/vcvrack_client.py connect 12 0 13 0
 python skills/vcvrack_client.py connect 12 0 13 1
 ```
 
-### 6. Save
+### 8. Save
 
 ```bash
 python skills/vcvrack_client.py save ~/Documents/Rack2/patches/02_subtractive_voice.vcv
 ```
+
+## Troubleshooting
+
+- If a param write times out, retry with just one `{id, value}` change and confirm Rack is not blocked by a modal or menu.
+- If the sound is too quiet or absent, re-check the cable routing with `module <id>` and make sure the Audio Interface is configured manually in Rack.
 
 ## Result
 

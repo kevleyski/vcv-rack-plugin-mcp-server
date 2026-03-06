@@ -118,6 +118,11 @@ A reliable workflow is:
 Start Rack -> add MCP Server -> turn it on -> verify /status -> connect your AI client -> search library -> add modules -> inspect module IDs and params -> connect cables -> save patch
 ```
 
+Two practical rules matter a lot for AI-driven patch building:
+
+- Rack edits are executed on Rack's UI thread. If Rack is busy, hidden behind a modal, or otherwise not stepping normally, MCP calls can time out even when the request is valid.
+- Parameter values are often raw knob positions, not musical units. Always inspect a module's parameter metadata before trying to set "65 Hz", "200 ms", "saw", or similar concepts directly.
+
 ### 1. Verify the server is alive
 
 From a terminal:
@@ -168,6 +173,13 @@ curl -s -X POST http://127.0.0.1:2600/modules/1/params \
   -d '{"params":[{"id":0,"value":0.0}]}' | python3 -m json.tool
 ```
 
+Important notes for parameter automation:
+
+- Call `GET /modules/:id/params` first and use the returned `name`, `min`, `max`, `value`, `displayValue`, and optional `options` fields as the source of truth.
+- Do not assume parameter `0` means frequency in Hz or that a value like `65` means 65 Hz. Many modules expose normalized or module-specific control ranges.
+- Prefer small `POST /modules/:id/params` batches, then read the params again to confirm the change before continuing.
+- If a write times out, first confirm Rack is responsive and the `MCP Server` module is still enabled, then retry with a smaller step.
+
 ### 5. Save your patch
 
 ```bash
@@ -204,7 +216,18 @@ Example prompts:
 - `List the modules currently in my Rack patch.`
 - `Search the installed Rack library for oscillators and add a good starting VCO.`
 - `Build a simple subtractive synth with VCO, VCF, VCA, ADSR, and Audio.`
+- `Build a simple ambient drone. Inspect each module's params before setting them, and treat displayed param values as authoritative instead of guessing in Hz.`
 - `Save the current patch to ~/Documents/Rack2/patches/test.vcv`.
+
+## Troubleshooting MCP timeouts
+
+If an MCP tool such as `vcvrack_set_params` reports a timeout:
+
+1. Make sure VCV Rack is still open, the patch is active, and the `MCP Server` module LED is green.
+2. Check that Rack is responsive and not blocked by a dialog, browser search field, menu, or file picker.
+3. Retry the workflow in this order: `vcvrack_get_status` -> `vcvrack_get_module` -> `vcvrack_get_params` -> `vcvrack_set_params`.
+4. Write one or two params at a time and keep values inside the reported `min` and `max` range.
+5. Re-read params after each write instead of assuming the model guessed the control mapping correctly.
 
 ### Cursor or another MCP client
 

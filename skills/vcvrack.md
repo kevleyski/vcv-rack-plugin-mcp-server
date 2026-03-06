@@ -36,6 +36,11 @@ If this fails, ask the user to:
 2. Add the **MCP Server** module (search "MCP Server" in the module browser)
 3. Click **ON/OFF** until the green STATUS LED lights up
 
+Two operating constraints are easy to miss:
+
+1. Rack changes are applied on Rack's UI thread, so if Rack is blocked by a modal, menu, file picker, or otherwise not updating normally, tool calls may time out.
+2. Parameter values are module-defined raw values. Do not assume a control expects literal Hz, seconds, or waveform names until `params` shows that clearly.
+
 ---
 
 ## Concepts: Signal Chains & Wiring
@@ -115,8 +120,15 @@ status → library → add → module → connect → set-param → save
 3.  **`add`** — Place modules in the rack. They will appear to the right of the Server module and be centered in your view.
 4.  **`module <id>`** — **Discovery Phase.** List the available inputs, outputs, and parameters.
 5.  **`connect`** — **Wiring Phase.** Link an `output` of one module to the `input` of another. (e.g., VCO Sine Out -> Audio In).
-6.  **`set-param`** — **Tuning Phase.** Adjust knobs to get the desired sound.
+6.  **`set-param`** — **Tuning Phase.** Adjust knobs using the raw ranges returned by `params`. Prefer one or two changes at a time, then re-read the params to verify the result.
 7.  **`save`** — Persist your creation.
+
+## Parameter Safety Rules
+
+- Always run `params <id>` immediately before `set-param`.
+- Use `displayValue` and `options` when present; they are better guides than guessing from the parameter name.
+- Keep writes inside the reported `min` and `max`.
+- If a write fails or times out, reduce the batch size and verify Rack is still responsive before retrying.
 
 
 ---
