@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vcvrack": {
+      "command": "node",
+      "args": ["/Users/klambert/Library/Application Support/Claude/vcvrack-mcp-bridge.js"]
+    }
+  }
+}
